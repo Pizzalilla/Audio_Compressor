@@ -17,6 +17,19 @@ def hann_window(n):
     return [0.5 * (1.0 - math.cos(2.0 * math.pi * i / n)) for i in range(n)]
 
 
+# Frames of silence added before and after the signal so that every real
+# sample sits under a full set of overlapping windows.
+LEAD_FRAMES = 1
+TAIL_FRAMES = 2
+
+
+def frame_positions(sample_count, frame_size, hop_size):
+    # Where each frame starts, relative to the padded signal. process()
+    # iterates over this; callers use len() on it to size a progress bar.
+    padded_length = sample_count + (LEAD_FRAMES + TAIL_FRAMES) * frame_size
+    return range(0, padded_length - frame_size + 1, hop_size)
+
+
 def analyse(samples, position, window):
     # Cut one frame starting at position, taper it with the window, and
     # transform it. Returns the frame's spectrum.
@@ -73,12 +86,13 @@ def process(samples, sample_rate, gain_curve_fn, frame_size=2048,
     # overlapping windows. Without this the first and last frame_size samples
     # would be attenuated by the window's taper.
     original_length = len(samples)
-    padded = [0.0] * frame_size + list(samples) + [0.0] * (2 * frame_size)
+    padded = ([0.0] * (LEAD_FRAMES * frame_size) + list(samples)
+              + [0.0] * (TAIL_FRAMES * frame_size))
 
     accumulated = [0.0] * len(padded)
     window_energy = [0.0] * len(padded)
 
-    positions = range(0, len(padded) - frame_size + 1, hop_size)
+    positions = frame_positions(original_length, frame_size, hop_size)
     total_frames = len(positions)
 
     for frame_index, position in enumerate(positions):
@@ -96,7 +110,8 @@ def process(samples, sample_rate, gain_curve_fn, frame_size=2048,
         progress_fn(total_frames, total_frames)
 
     output = []
-    for i in range(frame_size, frame_size + original_length):
+    start = LEAD_FRAMES * frame_size
+    for i in range(start, start + original_length):
         energy = window_energy[i]
         output.append(accumulated[i] / energy if energy > 1e-8 else 0.0)
     return output

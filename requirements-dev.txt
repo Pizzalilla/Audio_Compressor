@@ -1,0 +1,6 @@
+-r requirements.txt
+
+pytest>=7.0
+
+# Only used to check our FFT against an independent implementation.
+numpy>=1.24

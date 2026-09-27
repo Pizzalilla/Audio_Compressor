@@ -12,8 +12,8 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from filters import graphic_eq_curve
-from stft import (analyse, cola_sum, hann_window, limit_peak, process,
-                  synthesise)
+from stft import (analyse, cola_sum, frame_positions, hann_window, limit_peak,
+                  process, synthesise)
 
 
 def music_like_signal(n, sample_rate=8000, seed=0):
@@ -209,6 +209,33 @@ def test_boosted_output_no_longer_clips():
     limited, attenuation, _ = limit_peak(raw)
     assert max(abs(v) for v in limited) <= 1.0
     assert attenuation > 0
+
+
+def test_frame_positions_matches_what_process_iterates():
+    # The app sizes its progress bar from this, so it has to agree with the
+    # loop exactly. It used to be recomputed by hand and drifted by one.
+    for length, frame_size, hop in [(4000, 256, 64), (66150, 2048, 512),
+                                    (1, 256, 64), (0, 256, 128)]:
+        positions = frame_positions(length, frame_size, hop)
+        seen = []
+        process(list(music_like_signal(length)), 8000,
+                lambda n, sr: [1.0] * n,
+                frame_size=frame_size, hop_size=hop,
+                progress_fn=lambda done, total: seen.append(total))
+        assert seen and seen[-1] == len(positions)
+
+
+def test_every_sample_is_fully_covered_by_windows():
+    # The padding exists so no real sample sits under a partial window.
+    length, frame_size, hop = 2000, 256, 64
+    window = hann_window(frame_size)
+    padded_length = length + 3 * frame_size
+    energy = [0.0] * padded_length
+    for position in frame_positions(length, frame_size, hop):
+        for i in range(frame_size):
+            energy[position + i] += window[i] ** 2
+    covered = energy[frame_size:frame_size + length]
+    assert min(covered) == pytest.approx(max(covered))
 
 
 def test_rejects_bad_frame_size():

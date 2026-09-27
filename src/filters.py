@@ -36,12 +36,29 @@ def db_to_linear(db):
     return 10.0 ** (db / 20.0)
 
 
-def band_centres(band_gains_db):
-    # Geometric centre of each band paired with its requested gain, sorted
-    # by frequency. Geometric rather than arithmetic because pitch is
-    # logarithmic: the midpoint of 20-250 Hz sounds like ~70 Hz, not 135 Hz.
+def band_centres(band_gains_db, sample_rate=None):
+    """Geometric centre of each band paired with its requested gain.
+
+    Geometric rather than arithmetic because pitch is logarithmic: the
+    midpoint of 20-250 Hz sounds like ~70 Hz, not 135 Hz.
+
+    When a sample rate is given, bands are clipped to the Nyquist frequency
+    first. Without that, a band lying wholly or partly above Nyquist has a
+    centre no bin can reach, so its slider silently under-delivers: at an
+    8 kHz sample rate the treble centre sits at 8944 Hz and asking for
+    +12 dB gets you +7.6 dB at best.
+
+    Returns:
+        list of (frequency, gain_db) sorted by frequency. Bands entirely
+        above Nyquist are dropped.
+    """
+    nyquist = sample_rate / 2.0 if sample_rate else None
     centres = []
     for name, (low, high) in BANDS.items():
+        if nyquist is not None:
+            if low >= nyquist:
+                continue
+            high = min(high, nyquist)
         centres.append((math.sqrt(low * high), band_gains_db.get(name, 0.0)))
     centres.sort()
     return centres
@@ -84,11 +101,22 @@ def graphic_eq_curve(n, sample_rate, band_gains_db):
         spectrum stays conjugate-symmetric and the inverse transform comes
         back real.
     """
-    centres = band_centres(band_gains_db)
+    centres = band_centres(band_gains_db, sample_rate)
+    if not centres:
+        return [1.0] * n
+
     # Taking the magnitude here is what makes the curve symmetric: bin k and
     # bin n - k differ only in the sign of their frequency.
-    return [db_to_linear(_gain_db_at(abs(f), centres))
-            for f in bin_frequencies(n, sample_rate)]
+    curve = [db_to_linear(_gain_db_at(abs(f), centres))
+             for f in bin_frequencies(n, sample_rate)]
+
+    # Bin 0 is 0 Hz: not a frequency anyone is equalising, but the constant
+    # offset of the frame. It sits below every band so it would otherwise
+    # inherit the lowest band's gain, and a recording with a DC offset would
+    # have that offset amplified along with the bass, eating headroom for no
+    # audible benefit.
+    curve[0] = 1.0
+    return curve
 
 
 def apply_gain(spectrum, gain_curve):

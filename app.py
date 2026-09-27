@@ -13,9 +13,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 import streamlit as st
 
 from audio_io import read_wav, write_wav, to_mono
-from filters import BANDS, graphic_eq_curve
+from filters import BANDS, band_centres, graphic_eq_curve
 from plots import plot_spectrum_comparison, plot_spectrogram, plot_waveform
-from stft import limit_peak, process
+from stft import frame_positions, limit_peak, process
 
 PRESETS = {
     "Flat": {"bass": 0, "mid": 0, "treble": 0},
@@ -91,8 +91,19 @@ def main():
         st.warning(f"Only the first {max_seconds}s are being processed.")
 
     hop_size = frame_size // (2 if overlap == "50%" else 4)
-    frames = max(1, (len(mono) + 3 * frame_size - frame_size) // hop_size)
+    frames = len(frame_positions(len(mono), frame_size, hop_size))
     st.caption(f"{frames:,} frames of {frame_size} samples, hop {hop_size}.")
+
+    # A band lying above Nyquist has no bins to act on, so its slider would
+    # do nothing at all. Say so rather than letting it look broken.
+    reachable = len(band_centres(gains, sample_rate))
+    if reachable < len(BANDS):
+        unreachable = list(BANDS)[reachable:]
+        st.warning(
+            f"This file's sample rate only carries audio up to "
+            f"{sample_rate // 2:,} Hz, so these controls have nothing to "
+            f"act on: {', '.join(unreachable)}."
+        )
 
     if not st.button("Apply equaliser", type="primary"):
         st.pyplot(plot_waveform(mono, sample_rate, "Input waveform"))
