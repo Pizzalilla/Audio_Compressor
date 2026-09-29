@@ -44,7 +44,7 @@ def test_gains_are_exact_at_band_centres():
     # away, which on a log scale is far enough to read a few tenths low.
     gains = {"bass": 9.0, "mid": -6.0, "treble": 3.0}
     centres = band_centres(gains, 44100)
-    for centre, expected in centres:
+    for centre, expected, _ in centres:
         assert _gain_db_at(centre, centres) == pytest.approx(expected)
 
 
@@ -52,7 +52,7 @@ def test_curve_gets_close_to_the_requested_gain_near_each_centre():
     gains = {"bass": 9.0, "mid": -6.0, "treble": 3.0}
     curve = graphic_eq_curve(4096, 44100, gains)
     freqs = bin_frequencies(4096, 44100)
-    for centre, expected in band_centres(gains, 44100):
+    for centre, expected, _ in band_centres(gains, 44100):
         k = min(range(2048), key=lambda i: abs(freqs[i] - centre))
         assert 20 * math.log10(curve[k]) == pytest.approx(expected, abs=0.5)
 
@@ -62,12 +62,23 @@ def test_flat_request_is_unity():
     assert graphic_eq_curve(64, 8000, {"bass": 0.0}) == pytest.approx([1.0] * 64)
 
 
-def test_dc_bin_is_never_touched():
-    # Bin 0 is the frame's constant offset, not a frequency being equalised.
-    # Leaving it alone stops a recording's DC offset being amplified with
-    # the bass.
+def test_dc_bin_follows_the_lowest_band():
+    # Bin 0 spans 0 Hz up to half a bin width, which at a 512-sample frame
+    # is 43 Hz of genuine bass. Exempting it from the bass control leaves
+    # that content unequalised and puts a step in the curve, so it gets the
+    # same gain as the rest of the band.
     for gain in [-24.0, -6.0, 6.0, 24.0]:
-        assert graphic_eq_curve(256, 44100, {"bass": gain})[0] == 1.0
+        curve = graphic_eq_curve(512, 44100, {"bass": gain})
+        assert 20 * math.log10(curve[0]) == pytest.approx(gain, abs=0.01)
+
+
+def test_curve_has_no_step_at_the_bottom():
+    # A discontinuity between adjacent bins is a brick-wall filter, which
+    # rings. Neighbouring bins should differ by a fraction of a dB.
+    curve = graphic_eq_curve(2048, 44100, {"bass": 12.0})
+    for k in range(4):
+        step = abs(20 * math.log10(curve[k + 1] / curve[k]))
+        assert step < 1.0, f"step of {step:.1f} dB between bins {k} and {k+1}"
 
 
 def test_band_centres_are_clamped_to_nyquist():
@@ -75,8 +86,16 @@ def test_band_centres_are_clamped_to_nyquist():
     # sample rate. At 22.05 kHz no bin reaches it, so asking for +12 dB
     # would quietly deliver less.
     for sample_rate in [16000, 22050, 44100]:
-        for centre, _ in band_centres({}, sample_rate):
+        for centre, _, _ in band_centres({}, sample_rate):
             assert centre <= sample_rate / 2
+
+
+def test_band_centres_report_their_names():
+    # The app uses these names to say which controls are inert, and the
+    # plots use them to label only the bands that were actually applied.
+    names = [name for _, _, name in band_centres({}, 44100)]
+    assert names == sorted(BANDS, key=lambda n: BANDS[n][0])
+    assert "treble" not in [name for _, _, name in band_centres({}, 8000)]
 
 
 def test_bands_entirely_above_nyquist_are_dropped():

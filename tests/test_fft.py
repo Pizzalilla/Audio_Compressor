@@ -14,8 +14,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from fft import (dft_naive, fft, ifft, is_power_of_two, next_power_of_two,
-                 pad_to_power_of_two)
+from fft import dft_naive, fft, ifft, is_power_of_two
 
 
 def random_signal(n, seed=0):
@@ -108,21 +107,12 @@ def test_empty_input():
     assert ifft([]) == []
 
 
-def test_power_of_two_helpers():
+def test_is_power_of_two():
     assert is_power_of_two(1)
     assert is_power_of_two(1024)
     assert not is_power_of_two(0)
     assert not is_power_of_two(3)
     assert not is_power_of_two(-4)
-
-    assert next_power_of_two(1) == 1
-    assert next_power_of_two(5) == 8
-    assert next_power_of_two(8) == 8
-    assert next_power_of_two(9) == 16
-
-    assert len(pad_to_power_of_two([1, 2, 3])) == 4
-    assert pad_to_power_of_two([1, 2, 3])[3] == 0.0
-    assert len(pad_to_power_of_two([1, 2, 3, 4])) == 4
 
 
 def test_matches_numpy():

@@ -86,17 +86,3 @@ def ifft(X):
 def is_power_of_two(n):
     # True if n is a positive power of 2.
     return n > 0 and n & (n - 1) == 0
-
-
-def next_power_of_two(n):
-    # Smallest power of 2 that is >= n.
-    if n <= 1:
-        return 1
-    return 1 << (n - 1).bit_length()
-
-
-def pad_to_power_of_two(x):
-    # Zero-pad x so its length is a power of 2. Returns a new list.
-    padded = list(x)
-    padded.extend([0.0] * (next_power_of_two(len(padded)) - len(padded)))
-    return padded

@@ -16,14 +16,17 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from fft import fft
-from filters import BANDS
+from filters import BANDS, band_centres
 from stft import hann_window
 
 FLOOR_DB = -120.0
+# The magnitude that FLOOR_DB corresponds to. Comparing against an unrelated
+# epsilon lets values far below the floor through and stretches the axis.
+FLOOR_MAGNITUDE = 10.0 ** (FLOOR_DB / 20.0)
 
 
 def _to_db(magnitude):
-    return 20.0 * math.log10(magnitude) if magnitude > 1e-12 else FLOOR_DB
+    return 20.0 * math.log10(max(magnitude, FLOOR_MAGNITUDE))
 
 
 def average_spectrum(samples, sample_rate, frame_size=2048, max_frames=24):
@@ -85,18 +88,6 @@ def plot_waveform(samples, sample_rate, title="Waveform"):
     return figure
 
 
-def plot_spectrum(samples, sample_rate, title="Spectrum", max_freq=20000):
-    # Magnitude in dB against frequency, log x-axis.
-    frequencies, magnitudes = average_spectrum(samples, sample_rate)
-    figure, axis = plt.subplots(figsize=(10, 3.5))
-    axis.plot(frequencies, magnitudes, linewidth=0.8)
-    axis.set_xlim(20, min(max_freq, sample_rate / 2))
-    _style_frequency_axis(axis, sample_rate)
-    axis.set_title(title)
-    figure.tight_layout()
-    return figure
-
-
 def plot_spectrum_comparison(before, after, sample_rate, band_gains_db=None):
     # Original and processed spectra stacked for comparison.
     before_freqs, before_db = average_spectrum(before, sample_rate)
@@ -113,11 +104,12 @@ def plot_spectrum_comparison(before, after, sample_rate, band_gains_db=None):
     _style_frequency_axis(bottom, sample_rate)
 
     if band_gains_db:
-        for name, (low, high) in BANDS.items():
-            gain = band_gains_db.get(name, 0.0)
+        # Label each band where its gain is actually applied. band_centres
+        # clamps to the file's Nyquist frequency and drops bands that fall
+        # above it, so a label only appears if the control did something.
+        for centre, gain, name in band_centres(band_gains_db, sample_rate):
             if gain == 0.0:
                 continue
-            centre = math.sqrt(low * high)
             bottom.annotate(
                 f"{name} {gain:+.0f} dB",
                 xy=(centre, 0.93), xycoords=("data", "axes fraction"),

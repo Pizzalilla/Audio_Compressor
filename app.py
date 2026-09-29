@@ -12,10 +12,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 import streamlit as st
 
-from audio_io import read_wav, write_wav, to_mono
+from audio_io import UnsupportedAudioError, read_wav, to_mono, write_wav
 from filters import BANDS, band_centres, graphic_eq_curve
-from plots import plot_spectrum_comparison, plot_spectrogram, plot_waveform
+from plots import plot_spectrogram, plot_spectrum_comparison, plot_waveform
 from stft import frame_positions, limit_peak, process
+
+# Attenuation below this is inaudible and not worth telling the user about.
+AUDIBLE_ATTENUATION_DB = 0.1
 
 PRESETS = {
     "Flat": {"bass": 0, "mid": 0, "treble": 0},
@@ -26,10 +29,37 @@ PRESETS = {
 }
 
 
-def to_wav_bytes(channels, sample_rate):
+def to_wav_bytes(channels, sample_rate, sample_width):
     buffer = io.BytesIO()
-    write_wav(buffer, channels, sample_rate)
+    write_wav(buffer, channels, sample_rate, sample_width)
     return buffer.getvalue()
+
+
+@st.cache_data(show_spinner=False)
+def load_audio(raw_bytes):
+    # Keyed on the file's bytes, so changing a slider no longer re-decodes
+    # the whole upload. Returns floats, which are what everything downstream
+    # works in.
+    return read_wav(io.BytesIO(raw_bytes))
+
+
+@st.cache_data(show_spinner=False)
+def equalise(raw_bytes, gains, frame_size, hop_size, max_seconds):
+    # Cached on everything that affects the result, so a rerun triggered by
+    # the download button or a layout change does not reprocess the audio.
+    channels, sample_rate, sample_width = load_audio(raw_bytes)
+    limit = int(max_seconds * sample_rate)
+    trimmed = [channel[:limit] for channel in channels]
+
+    outputs = [
+        process(channel, sample_rate,
+                lambda n, sr: graphic_eq_curve(n, sr, dict(gains)),
+                frame_size=frame_size, hop_size=hop_size)
+        for channel in trimmed
+    ]
+
+    outputs, attenuation, peak = limit_peak(outputs)
+    return trimmed, outputs, sample_rate, sample_width, attenuation, peak
 
 
 def main():
@@ -60,10 +90,6 @@ def main():
             "Frame size", options=[512, 1024, 2048, 4096], value=2048,
             help="Larger frames resolve frequency better but smear time.",
         )
-        overlap = st.select_slider(
-            "Overlap", options=["50%", "75%"], value="75%",
-            help="75% is more robust when the spectrum is modified heavily.",
-        )
         max_seconds = st.slider(
             "Seconds to process", 1, 30, 5,
             help="The FFT here is pure Python, so long files are slow.",
@@ -73,66 +99,87 @@ def main():
         st.info("Upload a WAV file to begin.")
         return
 
-    channels, sample_rate = read_wav(uploaded)
-    mono = to_mono(channels)
+    raw_bytes = uploaded.getvalue()
+    try:
+        channels, sample_rate, sample_width = load_audio(raw_bytes)
+    except UnsupportedAudioError as error:
+        st.error(f"Could not read this file: {error}")
+        return
+
+    # A quarter-frame hop is the coarsest that reconstructs cleanly once the
+    # spectrum has been altered; see MIN_OVERLAP_FACTOR in stft.py.
+    hop_size = frame_size // 4
 
     limit = int(max_seconds * sample_rate)
-    truncated = len(mono) > limit
-    if truncated:
-        mono = mono[:limit]
+    total_samples = len(channels[0])
+    truncated = total_samples > limit
+    shown = min(total_samples, limit)
 
-    duration = len(mono) / sample_rate
     columns = st.columns(4)
     columns[0].metric("Sample rate", f"{sample_rate:,} Hz")
     columns[1].metric("Channels", len(channels))
-    columns[2].metric("Duration", f"{duration:.1f} s")
-    columns[3].metric("Samples", f"{len(mono):,}")
+    columns[2].metric("Bit depth", f"{sample_width * 8}-bit")
+    columns[3].metric("Duration", f"{shown / sample_rate:.1f} s")
     if truncated:
         st.warning(f"Only the first {max_seconds}s are being processed.")
 
-    hop_size = frame_size // (2 if overlap == "50%" else 4)
-    frames = len(frame_positions(len(mono), frame_size, hop_size))
-    st.caption(f"{frames:,} frames of {frame_size} samples, hop {hop_size}.")
+    frames = len(frame_positions(shown, frame_size, hop_size)) * len(channels)
+    st.caption(
+        f"{frames:,} frames of {frame_size} samples, hop {hop_size}, "
+        f"across {len(channels)} channel{'s' if len(channels) > 1 else ''}."
+    )
 
     # A band lying above Nyquist has no bins to act on, so its slider would
     # do nothing at all. Say so rather than letting it look broken.
-    reachable = len(band_centres(gains, sample_rate))
-    if reachable < len(BANDS):
-        unreachable = list(BANDS)[reachable:]
+    active = {name for _, _, name in band_centres(gains, sample_rate)}
+    inert = [name for name in BANDS if name not in active]
+    if inert:
         st.warning(
-            f"This file's sample rate only carries audio up to "
-            f"{sample_rate // 2:,} Hz, so these controls have nothing to "
-            f"act on: {', '.join(unreachable)}."
+            f"This file only carries audio up to {sample_rate // 2:,} Hz, so "
+            f"these controls have nothing to act on: {', '.join(inert)}."
         )
 
-    if not st.button("Apply equaliser", type="primary"):
-        st.pyplot(plot_waveform(mono, sample_rate, "Input waveform"))
+    settings = (uploaded.name, len(raw_bytes), tuple(sorted(gains.items())),
+                frame_size, hop_size, max_seconds)
+
+    # Remember that the user asked for this, rather than reading the button
+    # directly. Streamlit reruns the whole script on every interaction, and
+    # a button reads False on any rerun it did not itself cause -- including
+    # the one the download button triggers, which used to wipe the results.
+    if st.button("Apply equaliser", type="primary"):
+        st.session_state["applied"] = settings
+
+    applied = st.session_state.get("applied")
+    if applied is None:
+        st.pyplot(plot_waveform(to_mono(channels)[:limit], sample_rate,
+                                "Input waveform"))
         return
 
-    bar = st.progress(0.0, text="Processing...")
+    if applied != settings:
+        st.caption("Settings have changed since this was rendered. "
+                   "Press Apply equaliser to update.")
 
-    def report(done, total):
-        bar.progress(min(1.0, done / total), text=f"Frame {done:,} of {total:,}")
+    _, _, frozen_gains, frame_size, hop_size, max_seconds = applied
+    gains = dict(frozen_gains)
 
-    processed = process(
-        mono, sample_rate,
-        lambda n, sr: graphic_eq_curve(n, sr, gains),
-        frame_size=frame_size,
-        hop_size=hop_size,
-        progress_fn=report,
-    )
-    bar.empty()
+    with st.spinner("Processing..."):
+        (original, processed, sample_rate, sample_width,
+         attenuation_db, peak) = equalise(
+            raw_bytes, frozen_gains, frame_size, hop_size, max_seconds)
 
-    processed, attenuation_db, peak = limit_peak(processed)
-    if attenuation_db > 0:
+    # Reconstruction can overshoot a full-scale input by a fraction of a
+    # decibel purely through floating-point error, and limit_peak dutifully
+    # scales that away. Reporting it would tell the user something happened
+    # when the 16-bit output is bit-identical either way.
+    if attenuation_db >= AUDIBLE_ATTENUATION_DB:
         st.info(
             f"Boosting pushed the peak to {peak:.2f}, above what a WAV file "
             f"can store. Output turned down by {attenuation_db:.1f} dB so it "
             f"fits. The balance between bands is unchanged."
         )
 
-    original_bytes = to_wav_bytes([mono], sample_rate)
-    processed_bytes = to_wav_bytes([processed], sample_rate)
+    original_bytes = to_wav_bytes(original, sample_rate, sample_width)
+    processed_bytes = to_wav_bytes(processed, sample_rate, sample_width)
 
     left, right = st.columns(2)
     with left:
@@ -146,11 +193,12 @@ def main():
             file_name=f"eq_{uploaded.name}", mime="audio/wav",
         )
 
-    st.pyplot(plot_spectrum_comparison(mono, processed, sample_rate, gains))
+    before, after = to_mono(original), to_mono(processed)
+    st.pyplot(plot_spectrum_comparison(before, after, sample_rate, gains))
 
     with st.expander("Spectrograms"):
-        st.pyplot(plot_spectrogram(mono, sample_rate))
-        st.pyplot(plot_spectrogram(processed, sample_rate))
+        st.pyplot(plot_spectrogram(before, sample_rate))
+        st.pyplot(plot_spectrogram(after, sample_rate))
 
 
 if __name__ == "__main__":
