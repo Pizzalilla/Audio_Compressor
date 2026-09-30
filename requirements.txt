@@ -1,3 +1,0 @@
-# Runtime. The FFT itself has no dependencies beyond the standard library.
-streamlit>=1.30
-matplotlib>=3.7

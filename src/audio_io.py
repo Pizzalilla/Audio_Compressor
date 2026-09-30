@@ -1,7 +1,10 @@
 """
 WAV reading and writing, using only the standard library `wave` module.
 
-Samples are handled internally as floats in [-1.0, 1.0].
+Adapted from the Audio_Equalizer project, with one deliberate difference:
+samples stay as signed integers rather than being scaled to floats. A
+lossless codec has to give back exactly the integers it was given, and a
+round trip through floats is one more place for that to go wrong.
 """
 
 import struct
@@ -17,8 +20,7 @@ def _decode(raw, sample_width, count):
     # it is stored unsigned with an offset of 128.
     #
     # A file whose data chunk is shorter than its header claims is truncated.
-    # Trimming to whatever arrived would pad the end with silence and look
-    # like a successful read, so refuse it instead.
+    # Refuse it rather than silently padding the end with silence.
     expected = count * sample_width
     if len(raw) < expected:
         raise UnsupportedAudioError(
@@ -58,14 +60,14 @@ def _encode(values, sample_width):
 
 
 def read_wav(source):
-    """Read a WAV file.
+    """Read a PCM WAV file.
 
     Args:
         source: a path, or any file-like object `wave` can open.
 
     Returns:
         (channels, sample_rate, sample_width) where channels is a list of
-        channels, each a list of floats in [-1, 1].
+        channels, each a list of signed integer samples.
 
     Raises:
         UnsupportedAudioError: for formats this module cannot read, and for
@@ -79,9 +81,6 @@ def read_wav(source):
             frame_count = wf.getnframes()
             raw = wf.readframes(frame_count)
     except wave.Error as error:
-        # The stdlib wave module only handles PCM. Floating-point WAV
-        # (format tag 3) is a common export from audio editors and lands
-        # here, so name it rather than surfacing "unknown format: 3".
         if "unknown format: 3" in str(error):
             raise UnsupportedAudioError(
                 "this is a 32-bit floating-point WAV, which this reader does "
@@ -96,47 +95,28 @@ def read_wav(source):
         raise UnsupportedAudioError(
             f"file declares {channel_count} channels")
 
-    total = frame_count * channel_count
-    values = _decode(raw, sample_width, total)
-    full_scale = float(1 << (sample_width * 8 - 1))
-
-    channels = [[] for _ in range(channel_count)]
-    for index, value in enumerate(values):
-        channels[index % channel_count].append(value / full_scale)
+    values = _decode(raw, sample_width, frame_count * channel_count)
+    channels = [values[c::channel_count] for c in range(channel_count)]
     return channels, sample_rate, sample_width
 
 
 def write_wav(destination, channels, sample_rate, sample_width=2):
-    # Write channels out as a WAV file. Values outside [-1, 1] are clipped.
+    """Write integer channels out as a PCM WAV file."""
     if not channels:
         raise ValueError("no channels to write")
-
     if len({len(c) for c in channels}) != 1:
         raise ValueError("channels must all be the same length")
 
-    peak = float(1 << (sample_width * 8 - 1))
-    limit = int(peak) - 1
-    frame_count = len(channels[0])
-
-    interleaved = []
-    for frame in range(frame_count):
-        for channel in channels:
-            # round(), not int(). Truncating biases every sample toward
-            # zero by up to one step, which shows up as a change to most
-            # samples even when nothing was supposed to happen to them.
-            scaled = round(max(-1.0, min(1.0, channel[frame])) * peak)
-            interleaved.append(max(-limit - 1, min(limit, scaled)))
+    low = -(1 << (sample_width * 8 - 1))
+    high = -low - 1
+    interleaved = [sample for frame in zip(*channels) for sample in frame]
+    for sample in interleaved:
+        if not low <= sample <= high:
+            raise ValueError(
+                f"sample {sample} does not fit in {sample_width} bytes")
 
     with wave.open(destination, "wb") as wf:
         wf.setnchannels(len(channels))
         wf.setsampwidth(sample_width)
         wf.setframerate(sample_rate)
         wf.writeframes(_encode(interleaved, sample_width))
-
-
-def to_mono(channels):
-    # Average a multi-channel signal down to a single channel.
-    if len(channels) == 1:
-        return list(channels[0])
-    count = len(channels)
-    return [sum(frame) / count for frame in zip(*channels)]

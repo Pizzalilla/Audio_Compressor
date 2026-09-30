@@ -1,16 +1,4 @@
 __pycache__/
-*.py[cod]
 .pytest_cache/
-.venv/
-venv/
-env/
-
+*.ahuf
 .DS_Store
-.vscode/
-.idea/
-
-# Audio artefacts
-*.wav
-!samples/*.wav
-*.mp3
-out/
